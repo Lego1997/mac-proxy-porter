@@ -7,6 +7,8 @@ set -euo pipefail
 
 BEGIN_MARK='# >>> mac-proxy-sync BEGIN >>>'
 END_MARK='# <<< mac-proxy-sync END <<<'
+RELAY_LABEL='com.pan.codex.quickq-stable-relay'
+RELAY_PLIST="$HOME/Library/LaunchAgents/$RELAY_LABEL.plist"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -46,9 +48,19 @@ remove_block "$HOME/.zshenv"
 remove_block "$HOME/.zshrc"
 
 echo
+bold "Stopping stable QuickQ relay"
+launchctl bootout "gui/$(id -u)/$RELAY_LABEL" >/dev/null 2>&1 || true
+rm -f "$RELAY_PLIST" \
+      "$HOME/.codex/quickq-stable-relay.js" \
+      "$HOME/.codex/quickq-stable-relay.out.log" \
+      "$HOME/.codex/quickq-stable-relay.err.log"
+ok "  + removed"
+
+echo
 bold "Running launchctl unsetenv for GUI-propagated vars"
 for v in http_proxy HTTP_PROXY https_proxy HTTPS_PROXY \
-         no_proxy NO_PROXY ALL_PROXY all_proxy; do
+         grpc_proxy GRPC_PROXY no_proxy NO_PROXY \
+         no_grpc_proxy NO_GRPC_PROXY ALL_PROXY all_proxy; do
   launchctl unsetenv "$v" 2>/dev/null || true
 done
 ok "  + cleared"
@@ -61,7 +73,8 @@ but the PARENT shell (the one that ran this uninstall) still has the proxy vars
 exported. Paste this into your current shell to finish the cleanup:
 
   unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY \
-        no_proxy NO_PROXY ALL_PROXY all_proxy
+        grpc_proxy GRPC_PROXY no_proxy NO_PROXY \
+        no_grpc_proxy NO_GRPC_PROXY ALL_PROXY all_proxy
   # either open a new Terminal tab, or replace the current zsh:
   exec zsh
 

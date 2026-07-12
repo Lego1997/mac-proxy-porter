@@ -1,39 +1,121 @@
 # >>> mac-proxy-sync BEGIN >>> do not edit; managed by ~/.codex/skills/mac-proxy-sync
-# macOS system-proxy auto-sync. Reads scutil --proxy, exports http_proxy /
-# https_proxy / no_proxy / ALL_PROXY. Runs for every zsh invocation so
-# non-interactive shells (zsh -c ..., scripts, subprocesses spawned by CLI
-# tools) also get the proxy.
+# macOS system-proxy auto-sync (v4). Runs for every zsh invocation
+# (interactive, zsh -c, scripts, LaunchAgents), so anything started from a
+# shell begins life with a live proxy env. Resolution cascade:
+#   1. scutil --proxy (the system proxy QuickQ maintains) -- used only if
+#      its port actually accepts connections right now;
+#   2. otherwise, if QuickQ is running, adopt its live listeners found via
+#      lsof (HTTP 10900-10999, SOCKS 10000-10099) -- QuickQ rotates ports
+#      on every reconnect and clears the system proxy while reconnecting;
+#   3. when QuickQ is live, route through fixed local relay ports so an
+#      already-running agent survives future QuickQ port rotations;
+#   4. otherwise unset all proxy vars (genuinely proxy-free network).
+# If scutil itself fails (e.g. fork exhaustion) the inherited env is kept
+# untouched. Port probes use the ztcp builtin: no fork needed.
+
+_mac_proxy_probe() {  # host port -> 0 iff a TCP connect succeeds
+  emulate -L zsh
+  [[ -n "${1:-}" && "${2:-}" == <-> ]] || return 1
+  # Only active-probe loopback: a connect to a remote/hung proxy could
+  # block the shell. Non-loopback hosts are trusted as configured.
+  [[ "$1" == (127.0.0.1|localhost|::1) ]] || return 0
+  zmodload zsh/net/tcp 2>/dev/null
+  (( $+builtins[ztcp] )) || return 0   # cannot probe: trust the config
+  local REPLY
+  if ztcp "$1" "$2" 2>/dev/null; then
+    ztcp -c "$REPLY" 2>/dev/null
+    return 0
+  fi
+  return 1
+}
+
 _mac_proxy_sync() {
   emulate -L zsh
-  local out eval_line
+  local out line
   out="$(/usr/sbin/scutil --proxy 2>/dev/null)" || return 0
-  eval_line="$(print -r -- "$out" | awk '
-    $1 == "HTTPEnable"   { he = $3 }
-    $1 == "HTTPProxy"    { hh = $3 }
-    $1 == "HTTPPort"     { hp = $3 }
-    $1 == "HTTPSEnable"  { se = $3 }
-    $1 == "HTTPSProxy"   { sh = $3 }
-    $1 == "HTTPSPort"    { sp = $3 }
-    $1 == "SOCKSEnable"  { ke = $3 }
-    $1 == "SOCKSProxy"   { kh = $3 }
-    $1 == "SOCKSPort"    { kp = $3 }
-    END {
-      if (he == "1" && hh != "" && hp != "") \
-        printf "export http_proxy=http://%s:%s HTTP_PROXY=http://%s:%s; ", hh, hp, hh, hp
-      else \
-        printf "unset http_proxy HTTP_PROXY; "
-      if (se == "1" && sh != "" && sp != "") \
-        printf "export https_proxy=http://%s:%s HTTPS_PROXY=http://%s:%s; ", sh, sp, sh, sp
-      else \
-        printf "unset https_proxy HTTPS_PROXY; "
-      if (ke == "1" && kh != "" && kp != "") \
-        printf "export ALL_PROXY=socks5h://%s:%s all_proxy=socks5h://%s:%s; ", kh, kp, kh, kp
-      else \
-        printf "unset ALL_PROXY all_proxy; "
-    }')"
-  eval "$eval_line"
-  export no_proxy="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,169.254.0.0/16"
-  export NO_PROXY="$no_proxy"
+  [[ -n "$out" ]] || return 0
+
+  local he=0 se=0 ke=0 hh='' hp='' hsh='' hsp='' kh='' kp=''
+  local -a w
+  for line in ${(f)out}; do
+    w=(${(z)line})
+    (( $#w >= 3 )) || continue
+    case "$w[1]" in
+      HTTPEnable)  he=$w[3]  ;;
+      HTTPProxy)   hh=$w[3]  ;;
+      HTTPPort)    hp=$w[3]  ;;
+      HTTPSEnable) se=$w[3]  ;;
+      HTTPSProxy)  hsh=$w[3] ;;
+      HTTPSPort)   hsp=$w[3] ;;
+      SOCKSEnable) ke=$w[3]  ;;
+      SOCKSProxy)  kh=$w[3]  ;;
+      SOCKSPort)   kp=$w[3]  ;;
+    esac
+  done
+
+  local http_host='' http_port='' socks_host='' socks_port=''
+  if [[ "$he" == 1 && -n "$hh" && -n "$hp" ]]; then
+    http_host=$hh http_port=$hp
+  elif [[ "$se" == 1 && -n "$hsh" && -n "$hsp" ]]; then
+    http_host=$hsh http_port=$hsp
+  fi
+  if [[ "$ke" == 1 && -n "$kh" && -n "$kp" ]]; then
+    socks_host=$kh socks_port=$kp
+  fi
+
+  # Dead or missing entries -> hunt for QuickQ's live listeners.
+  local need_http=0 need_socks=0
+  _mac_proxy_probe "$http_host" "$http_port" || { need_http=1; http_host=''; http_port=''; }
+  _mac_proxy_probe "$socks_host" "$socks_port" || { need_socks=1; socks_host=''; socks_port=''; }
+  # NB: process is named "QuickQ For Mac" -> substring pgrep, prefix lsof -c.
+  local quickq_running=0
+  /usr/bin/pgrep -q QuickQ 2>/dev/null && quickq_running=1
+  if (( need_http || need_socks )) && (( quickq_running )); then
+    local lsout='' p
+    lsout="$(/usr/sbin/lsof -nP -a -c QuickQ -iTCP@127.0.0.1 -sTCP:LISTEN 2>/dev/null)"
+    for line in ${(f)lsout}; do
+      [[ "$line" =~ '127\.0\.0\.1:([0-9]+)' ]] || continue
+      p=$match[1]
+      if (( need_http )) && [[ -z "$http_port" ]] && (( p >= 10900 && p <= 10999 )); then
+        http_host=127.0.0.1 http_port=$p
+      elif (( need_socks )) && [[ -z "$socks_port" ]] && (( p >= 10000 && p <= 10099 )); then
+        socks_host=127.0.0.1 socks_port=$p
+      fi
+    done
+  fi
+
+  # QuickQ rotates its real ports. Prefer the stable relay when installed;
+  # fall back to the discovered direct ports if the relay is unavailable.
+  local relay_http_port=17890 relay_socks_port=17891
+  if (( quickq_running )); then
+    if [[ "$http_host" == (127.0.0.1|localhost|::1) && "$http_port" == <-> ]] \
+       && (( http_port >= 10900 && http_port <= 10999 )) \
+       && _mac_proxy_probe 127.0.0.1 "$relay_http_port"; then
+      http_host=127.0.0.1 http_port=$relay_http_port
+    fi
+    if [[ "$socks_host" == (127.0.0.1|localhost|::1) && "$socks_port" == <-> ]] \
+       && (( socks_port >= 10000 && socks_port <= 10099 )) \
+       && _mac_proxy_probe 127.0.0.1 "$relay_socks_port"; then
+      socks_host=127.0.0.1 socks_port=$relay_socks_port
+    fi
+  fi
+
+  local nv="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,169.254.0.0/16"
+  if [[ -n "$http_host" && -n "$http_port" ]]; then
+    local hv="http://${http_host}:${http_port}"
+    export http_proxy="$hv" HTTP_PROXY="$hv" https_proxy="$hv" HTTPS_PROXY="$hv" \
+           grpc_proxy="$hv" GRPC_PROXY="$hv"
+  else
+    unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY grpc_proxy GRPC_PROXY
+  fi
+  if [[ -n "$socks_host" && -n "$socks_port" ]]; then
+    local sv="socks5h://${socks_host}:${socks_port}"
+    export ALL_PROXY="$sv" all_proxy="$sv"
+  else
+    unset ALL_PROXY all_proxy
+  fi
+  export no_proxy="$nv" NO_PROXY="$nv" no_grpc_proxy="$nv" NO_GRPC_PROXY="$nv"
+  return 0
 }
 _mac_proxy_sync
 # <<< mac-proxy-sync END <<<
