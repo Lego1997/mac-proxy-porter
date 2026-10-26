@@ -9,6 +9,8 @@ BEGIN_MARK='# >>> mac-proxy-sync BEGIN >>>'
 END_MARK='# <<< mac-proxy-sync END <<<'
 RELAY_LABEL='com.pan.codex.quickq-stable-relay'
 RELAY_PLIST="$HOME/Library/LaunchAgents/$RELAY_LABEL.plist"
+ENV_LABEL='com.pan.codex.quickq-proxy-env'
+ENV_PLIST="$HOME/Library/LaunchAgents/$ENV_LABEL.plist"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -54,6 +56,14 @@ rm -f "$RELAY_PLIST" \
       "$HOME/.codex/quickq-stable-relay.js" \
       "$HOME/.codex/quickq-stable-relay.out.log" \
       "$HOME/.codex/quickq-stable-relay.err.log"
+ok "  + removed"
+
+echo
+bold "Stopping launchctl env mirror"
+launchctl bootout "gui/$(id -u)/$ENV_LABEL" >/dev/null 2>&1 || true
+rm -f "$ENV_PLIST" \
+      "$HOME/.codex/quickq-proxy-env.sh" \
+      "$HOME/.codex/quickq-proxy-env.log"
 ok "  + removed"
 
 echo

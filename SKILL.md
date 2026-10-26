@@ -1,6 +1,6 @@
 ---
 name: mac-proxy-sync
-description: Install, diagnose, update, or remove a macOS zsh setup that auto-syncs the active system proxy (scutil --proxy) into http_proxy/https_proxy/ALL_PROXY env vars on every shell start AND right before every interactive command launches (preexec), falling back to the proxy app's live listener (lsof scan, QuickQ-style rotating ports) when the system proxy is stale or momentarily cleared, plus a syncproxy command and companion LaunchAgent that mirror env to launchctl setenv for GUI apps. Use when the user asks to "set up proxy auto-sync", is behind a changing-port local proxy (Clash, V2Ray, Shadowsocks, Mihomo, Surge), has trouble with CLI tools such as claude, codex, npm, git, curl, or pip from Terminal, wants to know why proxy env vars are stale or missing, or wants to disable the auto-sync on a no-proxy-needed network. Also triggers on "status of proxy sync", "update proxy sync", and "uninstall mac-proxy-sync".
+description: Install, diagnose, update, or remove a macOS zsh setup that auto-syncs the active system proxy (scutil --proxy) into http_proxy/https_proxy/ALL_PROXY env vars on every shell start AND right before every interactive command launches (preexec), falling back to the proxy app's live listener (lsof scan, QuickQ-style rotating ports) when the system proxy is stale or momentarily cleared, plus a syncproxy command and companion LaunchAgent that mirror env to launchctl setenv so GUI apps (Claude Desktop, ChatGPT Desktop, Cursor, Grok Bot, Codex Desktop) and the CLIs they spawn inherit the proxy. Use when the user asks to "set up proxy auto-sync", is behind a changing-port local proxy (Clash, V2Ray, Shadowsocks, Mihomo, Surge), has trouble with CLI tools such as claude, codex, npm, git, curl, or pip from Terminal, wants to know why proxy env vars are stale or missing, or wants to disable the auto-sync on a no-proxy-needed network. Also triggers on "status of proxy sync", "update proxy sync", and "uninstall mac-proxy-sync".
 ---
 
 # Mac Proxy Porter
@@ -41,13 +41,28 @@ agents to recover after reconnect; 4) otherwise unset all proxy vars. If
 untouched rather than clobbered.
 
 A companion LaunchAgent (`~/Library/LaunchAgents/com.pan.codex.quickq-proxy-env.plist`
-running `~/.codex/quickq-proxy-env.sh`) mirrors the same resolved env into
-`launchctl setenv` at login, every 60 s, and immediately on system-proxy
-changes (WatchPaths on `/Library/Preferences/SystemConfiguration/preferences.plist`),
-so GUI-launched apps (Codex Desktop, editors) inherit a live proxy too. The
-script relies on the `~/.zshenv` block for resolution, so keep both in sync.
-Limitation (by design): an already-running process keeps the env it started
-with — restart the app/CLI after a proxy change mid-session.
+running `~/.codex/quickq-proxy-env.sh`, installed by `install.sh`) mirrors the
+same resolved env into `launchctl setenv` at login, every 60 s, and
+immediately on system-proxy changes (WatchPaths on
+`/Library/Preferences/SystemConfiguration/preferences.plist`), so GUI-launched
+apps (Claude Desktop, ChatGPT Desktop, Cursor, Grok Bot, Codex Desktop,
+editors) and the CLIs they spawn inherit a live proxy too. The script relies
+on the `~/.zshenv` block for resolution, so keep both in sync. Because the
+mirrored address is the stable relay, the launchd value stays valid across
+QuickQ port rotations. Limitation (by design): a process keeps the env it
+started with, so quit and relaunch a GUI app that was open before the install
+(or before a change to a non-relay proxy).
+
+GUI-app notes:
+- The apps' own HTTP stacks (native and Electron) follow the macOS system
+  proxy directly and never needed env vars. The env matters for what they
+  spawn: Claude Code inside Claude Desktop, Codex inside ChatGPT/Codex
+  Desktop, Cursor's agent terminals and extension hosts, Grok Bot's local
+  command execution, plus node/python/git/curl helpers.
+- Shells those apps open (`zsh -lc ...`, integrated terminals) also run the
+  `~/.zshenv` block, so they re-resolve at start even without launchd env.
+- `status.sh` lists each running app with the proxy address in its env and
+  says whether a relaunch is needed.
 
 ## Modes
 
@@ -59,7 +74,12 @@ When invoked, determine intent and call the matching script:
    bash ~/.codex/skills/mac-proxy-sync/scripts/install.sh
    ```
    Idempotent. Safe to re-run. Aborts with a diff if marker regions exist
-   but differ from the canonical block (user must uninstall first).
+   but differ from the canonical block (user must uninstall first, or pass
+   `--update`). Also installs the stable relay and the launchctl env mirror
+   LaunchAgents. On a fresh Mac, or when the skill lives elsewhere, run
+   `bash scripts/bootstrap.sh` instead: it copies the skill to
+   `~/.codex/skills/mac-proxy-sync`, links it into `~/.claude/skills`, then
+   runs the installer.
 
 2. **status** (for "check proxy sync", "is my proxy set up", "diagnose",
    "claude/codex looks frozen"):
@@ -88,9 +108,10 @@ When invoked, determine intent and call the matching script:
    ```
    bash ~/.codex/skills/mac-proxy-sync/scripts/uninstall.sh
    ```
-   Removes both marker regions, runs `launchctl unsetenv` for each var, and
-   prints explicit `unset ...; exec zsh` commands the user must paste into
-   their current shell (a subshell can't unset the parent's env).
+   Removes both marker regions and both LaunchAgents, runs
+   `launchctl unsetenv` for each var, and prints explicit `unset ...; exec zsh`
+   commands the user must paste into their current shell (a subshell can't
+   unset the parent's env).
 
 ## The canonical zsh blocks
 
@@ -123,3 +144,4 @@ same skill appears as `/mac-proxy-sync` in Claude Code (which only scans
 `~/.claude/skills`) while Codex keeps reading `~/.codex/skills`. If the
 slash command disappears, recreate the symlink:
 `ln -s ~/.codex/skills/mac-proxy-sync ~/.claude/skills/mac-proxy-sync`
+(or just re-run `bash scripts/bootstrap.sh`).

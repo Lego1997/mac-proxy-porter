@@ -13,6 +13,10 @@ RELAY_LABEL="com.pan.codex.quickq-stable-relay"
 RELAY_PLIST="$HOME/Library/LaunchAgents/$RELAY_LABEL.plist"
 RELAY_HTTP_PORT=17890
 RELAY_SOCKS_PORT=17891
+ENV_SRC="$SKILL_DIR/scripts/quickq-proxy-env.sh"
+ENV_DST="$HOME/.codex/quickq-proxy-env.sh"
+ENV_LABEL="com.pan.codex.quickq-proxy-env"
+ENV_PLIST="$HOME/Library/LaunchAgents/$ENV_LABEL.plist"
 
 BEGIN_MARK='# >>> mac-proxy-sync BEGIN >>>'
 END_MARK='# <<< mac-proxy-sync END <<<'
@@ -95,13 +99,18 @@ install_relay() {
   else
     node_bin="$(command -v node 2>/dev/null || true)"
   fi
+  if [[ -n "$node_bin" ]]; then
+    # Pin the real binary: ~/.local/bin/node style symlinks come and go with
+    # tool managers, and launchd would then fail to start the relay.
+    node_bin="$(/usr/bin/readlink -f "$node_bin" 2>/dev/null || printf '%s' "$node_bin")"
+  fi
   if [[ -z "$node_bin" ]]; then
     warn "No Node.js runtime found; skipping the stable QuickQ relay."
     warn "Shells will still sync dynamically, but running agents must restart after a port rotation."
     return 0
   fi
 
-  bold "Installing stable QuickQ relay"
+  bold "Installing stable QuickQ relay (node: $node_bin)"
   mkdir -p "$HOME/.codex" "$HOME/Library/LaunchAgents"
   install -m 0755 "$RELAY_SRC" "$RELAY_DST"
 
@@ -163,6 +172,65 @@ EOF
   return 2
 }
 
+install_env_agent() {
+  bold "Installing launchctl env mirror (GUI apps: Claude, ChatGPT, Cursor, Grok Bot, ...)"
+  mkdir -p "$HOME/.codex" "$HOME/Library/LaunchAgents"
+  install -m 0755 "$ENV_SRC" "$ENV_DST"
+
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$ENV_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>$ENV_DST</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>WatchPaths</key>
+  <array>
+    <string>/Library/Preferences/SystemConfiguration/preferences.plist</string>
+  </array>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$HOME/.codex/quickq-proxy-env.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/.codex/quickq-proxy-env.log</string>
+</dict>
+</plist>
+EOF
+  /usr/bin/plutil -lint "$tmp" >/dev/null
+  mv "$tmp" "$ENV_PLIST"
+  chmod 0644 "$ENV_PLIST"
+
+  local domain="gui/$(id -u)"
+  /bin/launchctl bootout "$domain/$ENV_LABEL" >/dev/null 2>&1 || true
+  /bin/sleep 0.2
+  /bin/launchctl bootstrap "$domain" "$ENV_PLIST"
+  /bin/launchctl kickstart -k "$domain/$ENV_LABEL"
+  local _ val
+  for _ in {1..30}; do
+    val="$(/bin/launchctl getenv https_proxy 2>/dev/null || true)"
+    if [[ -n "$val" ]]; then
+      ok "  + launchctl https_proxy = $val"
+      return 0
+    fi
+    /bin/sleep 0.1
+  done
+  warn "  launchctl https_proxy still unset (no working proxy right now?); the agent retries every 60 s."
+  warn "  log: $HOME/.codex/quickq-proxy-env.log"
+  return 0
+}
+
 bold "== mac-proxy-sync install =="
 echo "skill dir: $SKILL_DIR"
 echo "block sources:"
@@ -178,7 +246,8 @@ fi
 
 install_block "$HOME/.zshenv" "$BLOCK_ENV"
 install_block "$HOME/.zshrc"  "$BLOCK_RC"
-install_relay
+install_relay || warn "Stable relay not installed; shells still sync, but running agents must restart after a QuickQ port rotation."
+install_env_agent
 
 echo
 bold "== Post-install =="
@@ -186,6 +255,10 @@ echo "To activate in the CURRENT shell:"
 echo "  source ~/.zshenv && source ~/.zshrc && syncproxy"
 echo
 echo "New Terminal tabs will pick this up automatically."
+echo
+echo "GUI apps (Claude, ChatGPT, Cursor, Grok Bot, Codex Desktop) read the proxy"
+echo "env from launchd when they START. Quit and relaunch any that were already"
+echo "open so they (and the CLIs they spawn) pick up the stable relay address."
 echo
 echo "Run 'bash $SKILL_DIR/scripts/status.sh' anytime to diagnose."
 ok "done."

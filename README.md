@@ -23,11 +23,23 @@ Mac Proxy Porter installs two marker-bounded zsh blocks:
    backstop, and a `syncproxy` command that pushes the current proxy env
    into `launchctl setenv`.
 
+It also installs two user LaunchAgents:
+
+1. `com.pan.codex.quickq-stable-relay`: a localhost TCP relay on fixed ports
+   (HTTP 17890, SOCKS 17891) that follows QuickQ's rotating listeners, so a
+   long-running agent keeps working across reconnects.
+2. `com.pan.codex.quickq-proxy-env`: runs `~/.codex/quickq-proxy-env.sh` at
+   login, every 60 s, and on system-proxy changes to mirror the resolved env
+   into `launchctl setenv`, so GUI apps and the CLIs they spawn inherit it.
+
 The blocks are managed by these scripts:
 
-- `scripts/install.sh`: install or update the zsh blocks.
-- `scripts/status.sh`: print a read-only diagnostic report.
-- `scripts/uninstall.sh`: remove the zsh blocks and clear launchctl proxy env.
+- `scripts/bootstrap.sh`: one-shot placement + Claude Code link + install.
+- `scripts/install.sh`: install or update the zsh blocks and LaunchAgents.
+- `scripts/status.sh`: print a read-only diagnostic report (includes a
+  per-GUI-app relaunch detector).
+- `scripts/uninstall.sh`: remove the zsh blocks and LaunchAgents and clear
+  launchctl proxy env.
 
 ## Requirements
 
@@ -38,26 +50,22 @@ The blocks are managed by these scripts:
 
 ## Install
 
-Clone or copy this repo into your Codex skills directory:
+One-shot (clones into the Codex skills directory, links it into Claude Code's
+skills directory, installs the shell blocks and both LaunchAgents):
 
 ```bash
-mkdir -p ~/.codex/skills
 git clone https://github.com/Lego1997/mac-proxy-porter.git ~/.codex/skills/mac-proxy-sync
-
-# Optional: expose the same skill to Claude Code
-mkdir -p ~/.claude/skills
-ln -s ~/.codex/skills/mac-proxy-sync ~/.claude/skills/mac-proxy-sync
-```
-
-Then install the shell integration:
-
-```bash
-bash ~/.codex/skills/mac-proxy-sync/scripts/install.sh
+bash ~/.codex/skills/mac-proxy-sync/scripts/bootstrap.sh
 source ~/.zshenv && source ~/.zshrc && syncproxy
 ```
 
-Open a new Terminal tab after installing. Later-launched GUI apps inherit values
-set through `launchctl`; already-running GUI apps need to be quit and reopened.
+`bootstrap.sh` can also be run from any other checkout; it copies the files
+into `~/.codex/skills/mac-proxy-sync` first. Pass `--update` after pulling a
+new version.
+
+Open a new Terminal tab after installing. GUI apps (Claude Desktop, ChatGPT
+Desktop, Cursor, Grok Bot, Codex Desktop) read the proxy env from launchd when
+they start, so quit and reopen any that were already running.
 
 ## Usage
 
@@ -118,6 +126,10 @@ current listeners every 500 ms and retries discovery when a connection races
 with a rotation. This lets a long-running Claude or Codex process reconnect
 after QuickQ changes ports without restarting the agent.
 
+While QuickQ is running and the relay is listening, the relay address is
+used even during a reconnect window when QuickQ has no live listener yet, so
+a process started in that window recovers on its own once QuickQ is back.
+
 The `preexec` hook re-resolves right after you press Enter and before the
 command runs — so even a tab that sat idle across several proxy restarts
 launches `claude` / `codex` with the current port. Its 2-second TTL only
@@ -169,7 +181,9 @@ configure `ProxyCommand` in `~/.ssh/config` separately.
 |   |-- blocks
 |   |   |-- zshenv.zsh
 |   |   `-- zshrc.zsh
+|   |-- bootstrap.sh
 |   |-- install.sh
+|   |-- quickq-proxy-env.sh
 |   |-- quickq-stable-relay.js
 |   |-- status.sh
 |   |-- test-quickq-stable-relay.js

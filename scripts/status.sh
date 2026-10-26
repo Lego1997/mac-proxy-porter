@@ -22,6 +22,8 @@ warn() { printf '\033[33m%s\033[0m\n' "$*"; }
 
 RELAY_HTTP_PORT=17890
 RELAY_SOCKS_PORT=17891
+ENV_LABEL=com.pan.codex.quickq-proxy-env
+RELAY_LABEL=com.pan.codex.quickq-stable-relay
 
 hdr "scutil --proxy"
 /usr/sbin/scutil --proxy 2>/dev/null || bad "  (scutil failed)"
@@ -90,6 +92,49 @@ else
   bad "  stable relay is not fully running; already-running agents cannot survive QuickQ rotation"
   dim "  run: bash ~/.codex/skills/mac-proxy-sync/scripts/install.sh --update"
 fi
+
+hdr "LaunchAgents (relay + launchctl env mirror)"
+for label in "$RELAY_LABEL" "$ENV_LABEL"; do
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  if [[ ! -f "$plist" ]]; then
+    bad "  $label: plist missing (run install.sh)"
+  elif launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+    ok "  $label: loaded"
+  else
+    bad "  $label: plist present but NOT loaded (launchctl bootstrap gui/$(id -u) $plist)"
+  fi
+done
+if [[ -f "$HOME/.codex/quickq-proxy-env.log" ]]; then
+  dim "  last env-mirror log line: $(tail -1 "$HOME/.codex/quickq-proxy-env.log" 2>/dev/null)"
+fi
+
+hdr "GUI apps vs launchctl proxy env (relaunch detector)"
+launch_https="$(launchctl getenv https_proxy 2>/dev/null || true)"
+launch_port="$(printf '%s' "$launch_https" | sed -n 's/.*:\([0-9]*\)$/\1/p')"
+gui_found=0
+for app in Claude ChatGPT Cursor "Grok Bot" Codex Otty; do
+  pid="$(ps -axo pid=,comm= | grep -F "/Applications/$app.app/Contents/MacOS/" | awk '{print $1}' | head -1)"
+  [[ -n "$pid" ]] || continue
+  gui_found=1
+  env_blob="$(ps eww -o command= -p "$pid" 2>/dev/null)"
+  port="$(printf '%s' "$env_blob" | tr ' ' '\n' | sed -n 's/^https_proxy=http:\/\/127\.0\.0\.1:\([0-9]*\)$/\1/p' | head -1)"
+  if [[ -z "$port" ]]; then
+    if [[ -n "$launch_https" ]]; then
+      warn "  $app (pid $pid): no proxy env; launched before the env mirror -> quit + relaunch to inherit $launch_https"
+    else
+      bad "  $app (pid $pid): no proxy env, and launchctl has none to give (proxy down?)"
+    fi
+  elif [[ "$port" == "$RELAY_HTTP_PORT" ]]; then
+    ok "  $app (pid $pid): stable relay 127.0.0.1:$port (survives QuickQ rotation)"
+  elif [[ -n "$launch_port" && "$port" == "$launch_port" ]]; then
+    ok "  $app (pid $pid): proxy 127.0.0.1:$port matches current launchctl env"
+  else
+    warn "  $app (pid $pid): holds 127.0.0.1:$port, launchctl now says ${launch_https:-unset} -> relaunch"
+  fi
+done
+(( gui_found )) || dim "  (none of Claude / ChatGPT / Cursor / Grok Bot / Codex / Otty is running)"
+dim "  Note: the apps' own HTTP stacks follow the macOS system proxy directly; this env"
+dim "  matters for the CLIs and helpers they spawn (claude, codex, node, python, git, curl)."
 
 hdr "Quick connectivity probe (10s timeout)"
 if [[ -n "${https_proxy:-}" ]]; then

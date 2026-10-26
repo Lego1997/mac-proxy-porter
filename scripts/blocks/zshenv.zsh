@@ -7,8 +7,9 @@
 #   2. otherwise, if QuickQ is running, adopt its live listeners found via
 #      lsof (HTTP 10900-10999, SOCKS 10000-10099) -- QuickQ rotates ports
 #      on every reconnect and clears the system proxy while reconnecting;
-#   3. when QuickQ is live, route through fixed local relay ports so an
-#      already-running agent survives future QuickQ port rotations;
+#   3. when QuickQ is running and the stable relay listens, export the fixed
+#      relay ports (17890/17891) so an already-running agent survives future
+#      rotations and a reconnect window;
 #   4. otherwise unset all proxy vars (genuinely proxy-free network).
 # If scutil itself fails (e.g. fork exhaustion) the inherited env is kept
 # untouched. Port probes use the ztcp builtin: no fork needed.
@@ -84,18 +85,32 @@ _mac_proxy_sync() {
     done
   fi
 
-  # QuickQ rotates its real ports. Prefer the stable relay when installed;
-  # fall back to the discovered direct ports if the relay is unavailable.
+  # QuickQ rotates its real ports. Whenever QuickQ is running and the stable
+  # relay is listening, export the fixed relay ports instead: a process that
+  # starts with the relay address keeps working across every later rotation,
+  # and even when started inside a reconnect window (no upstream yet) it
+  # recovers as soon as QuickQ is back. A non-QuickQ proxy (other port range,
+  # or a remote host) is left exactly as configured.
   local relay_http_port=17890 relay_socks_port=17891
   if (( quickq_running )); then
-    if [[ "$http_host" == (127.0.0.1|localhost|::1) && "$http_port" == <-> ]] \
-       && (( http_port >= 10900 && http_port <= 10999 )) \
-       && _mac_proxy_probe 127.0.0.1 "$relay_http_port"; then
+    local want_relay=0
+    if [[ -z "$http_port" ]]; then
+      want_relay=1
+    elif [[ "$http_host" == (127.0.0.1|localhost|::1) && "$http_port" == <-> ]] \
+         && (( http_port >= 10900 && http_port <= 10999 )); then
+      want_relay=1
+    fi
+    if (( want_relay )) && _mac_proxy_probe 127.0.0.1 "$relay_http_port"; then
       http_host=127.0.0.1 http_port=$relay_http_port
     fi
-    if [[ "$socks_host" == (127.0.0.1|localhost|::1) && "$socks_port" == <-> ]] \
-       && (( socks_port >= 10000 && socks_port <= 10099 )) \
-       && _mac_proxy_probe 127.0.0.1 "$relay_socks_port"; then
+    want_relay=0
+    if [[ -z "$socks_port" ]]; then
+      want_relay=1
+    elif [[ "$socks_host" == (127.0.0.1|localhost|::1) && "$socks_port" == <-> ]] \
+         && (( socks_port >= 10000 && socks_port <= 10099 )); then
+      want_relay=1
+    fi
+    if (( want_relay )) && _mac_proxy_probe 127.0.0.1 "$relay_socks_port"; then
       socks_host=127.0.0.1 socks_port=$relay_socks_port
     fi
   fi
